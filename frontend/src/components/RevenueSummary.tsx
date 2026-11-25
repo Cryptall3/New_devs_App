@@ -6,29 +6,30 @@ interface RevenueData {
     total_revenue: number;
     currency: string;
     reservations_count: number;
+    month?: number | null;
+    year?: number | null;
 }
 
 interface RevenueSummaryProps {
     propertyId?: string;
-    debugTenant?: string; 
+    month?: number;
+    year?: number;
     showRaw?: boolean;
 }
 
-export const RevenueSummary: React.FC<RevenueSummaryProps> = ({ propertyId = 'prop-001', debugTenant, showRaw }) => {
+export const RevenueSummary: React.FC<RevenueSummaryProps> = ({ propertyId = 'prop-001', month, year, showRaw }) => {
     const [data, setData] = useState<RevenueData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-
-    const activeTenant = debugTenant || 'candidate';
 
     useEffect(() => {
         const fetchRevenue = async () => {
             setLoading(true);
             try {
-                // Use SecureAPI to handle authentication automatically
-                // We pass the simulatedTenant option which SecureAPI will attach as a header
+                // The backend derives the tenant from the authenticated session.
                 const response = await SecureAPI.getDashboardSummary(propertyId, {
-                    simulatedTenant: activeTenant,
+                    month,
+                    year,
                     timestamp: Date.now()
                 });
                 setData(response);
@@ -41,7 +42,7 @@ export const RevenueSummary: React.FC<RevenueSummaryProps> = ({ propertyId = 'pr
         };
 
         fetchRevenue();
-    }, [propertyId, activeTenant]);
+    }, [propertyId, month, year]);
 
     if (loading) {
         return (
@@ -61,7 +62,12 @@ export const RevenueSummary: React.FC<RevenueSummaryProps> = ({ propertyId = 'pr
     if (error) return <div className="p-4 text-red-500 bg-red-50 rounded-lg">{error}</div>;
     if (!data) return null;
 
-    const displayTotal = Math.round(data.total_revenue * 100) / 100;
+    // Values arrive already rounded to cents by the backend. Format for display
+    // without doing further floating-point arithmetic on the amount.
+    const displayTotal = Number(data.total_revenue.toFixed(2));
+    const monthLabel = data.month && data.year
+        ? new Date(data.year, data.month - 1, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' })
+        : null;
 
     return (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow duration-300">
@@ -75,7 +81,7 @@ export const RevenueSummary: React.FC<RevenueSummaryProps> = ({ propertyId = 'pr
             <div className="p-6">
                 <div className="flex items-center justify-between mb-6">
                     <div>
-                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide">Total Revenue</h2>
+                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide">Total Revenue{monthLabel ? ` — ${monthLabel}` : ''}</h2>
                         <div className="flex items-baseline gap-2 mt-1">
                             <span className="text-3xl font-bold text-gray-900 tracking-tight">
                                 {data.currency} {displayTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}

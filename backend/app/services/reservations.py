@@ -1,109 +1,133 @@
 from datetime import datetime
-from decimal import Decimal
-from typing import Dict, Any, List
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Any, Dict
+from zoneinfo import ZoneInfo
 
-async def calculate_monthly_revenue(property_id: str, month: int, year: int, db_session=None) -> Decimal:
-    """
-    Calculates revenue for a specific month.
-    """
+MONEY_QUANT = Decimal("0.01")
 
-    start_date = datetime(year, month, 1)
+
+class PropertyNotFound(Exception):
+    """Raised when a property does not exist for the requesting tenant."""
+
+
+def _to_money(value: Decimal) -> Decimal:
+    """Round a currency amount once, half-up, at the very end of the calculation."""
+    return Decimal(value).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _month_bounds_local(year: int, month: int, tz: ZoneInfo) -> tuple[datetime, datetime]:
+    """Return the instants bounding a calendar month in the property's timezone."""
+    local_start = datetime(year, month, 1, tzinfo=tz)
     if month < 12:
-        end_date = datetime(year, month + 1, 1)
+        local_end = datetime(year, month + 1, 1, tzinfo=tz)
     else:
-        end_date = datetime(year + 1, 1, 1)
-        
-    print(f"DEBUG: Querying revenue for {property_id} from {start_date} to {end_date}")
+        local_end = datetime(year + 1, 1, 1, tzinfo=tz)
+    return local_start, local_end
 
-    # SQL Simulation (This would be executed against the actual DB)
-    query = """
-        SELECT SUM(total_amount) as total
-        FROM reservations
-        WHERE property_id = $1
-        AND tenant_id = $2
-        AND check_in_date >= $3
-        AND check_in_date < $4
-    """
-    
-    # In production this query executes against a database session.
-    # result = await db.fetch_val(query, property_id, tenant_id, start_date, end_date)
-    # return result or Decimal('0')
-    
-    return Decimal('0') # Placeholder for now until DB connection is finalized
 
-async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str, Any]:
+async def _get_property(session, property_id: str, tenant_id: str):
     """
-    Aggregates revenue from database.
+    Fetch a property scoped to the tenant.
+
+    Returns None when the property does not exist for that tenant, which lets
+    callers tell "this property is not yours" apart from "no bookings yet".
     """
-    try:
-        # Import database pool
-        from app.core.database_pool import DatabasePool
-        
-        # Initialize pool if needed
-        db_pool = DatabasePool()
-        await db_pool.initialize()
-        
-        if db_pool.session_factory:
-            async with db_pool.get_session() as session:
-                # Use SQLAlchemy text for raw SQL
-                from sqlalchemy import text
-                
-                query = text("""
-                    SELECT 
-                        property_id,
-                        SUM(total_amount) as total_revenue,
-                        COUNT(*) as reservation_count
-                    FROM reservations 
-                    WHERE property_id = :property_id AND tenant_id = :tenant_id
-                    GROUP BY property_id
-                """)
-                
-                result = await session.execute(query, {
-                    "property_id": property_id, 
-                    "tenant_id": tenant_id
-                })
-                row = result.fetchone()
-                
-                if row:
-                    total_revenue = Decimal(str(row.total_revenue))
-                    return {
-                        "property_id": property_id,
-                        "tenant_id": tenant_id,
-                        "total": str(total_revenue),
-                        "currency": "USD", 
-                        "count": row.reservation_count
-                    }
-                else:
-                    # No reservations found for this property
-                    return {
-                        "property_id": property_id,
-                        "tenant_id": tenant_id,
-                        "total": "0.00",
-                        "currency": "USD",
-                        "count": 0
-                    }
+    from sqlalchemy import text
+
+    result = await session.execute(
+        text("SELECT timezone FROM properties WHERE id = :property_id AND tenant_id = :tenant_id"),
+        {"property_id": property_id, "tenant_id": tenant_id},
+    )
+    return result.fetchone()
+
+
+async def calculate_total_revenue(
+    property_id: str,
+    tenant_id: str,
+    month: int | None = None,
+    year: int | None = None,
+) -> Dict[str, Any]:
+    """
+    Aggregate revenue for a calendar month in the property's local timezone.
+
+    Defaults to the most recent month that has bookings for this property.
+    Raises PropertyNotFound when the property is not owned by the tenant.
+    """
+    from app.core.database_pool import db_pool
+    from sqlalchemy import text
+
+    await db_pool.initialize()
+    if not db_pool.session_factory:
+        raise RuntimeError("Database pool not available")
+
+    async with db_pool.get_session() as session:
+        property_row = await _get_property(session, property_id, tenant_id)
+        if not property_row:
+            # Do not reveal whether the property exists for another tenant.
+            raise PropertyNotFound(property_id)
+
+        timezone_name = property_row.timezone or "UTC"
+        try:
+            property_tz = ZoneInfo(timezone_name)
+        except Exception:
+            property_tz = ZoneInfo("UTC")
+
+        # Group the requested month in the property's local time, not in UTC.
+        if month and year:
+            target_year, target_month = year, month
         else:
-            raise Exception("Database pool not available")
-            
-    except Exception as e:
-        print(f"Database error for {property_id} (tenant: {tenant_id}): {e}")
-        
-        # Create property-specific mock data for testing when DB is unavailable
-        # This ensures each property shows different figures
-        mock_data = {
-            'prop-001': {'total': '1000.00', 'count': 3},
-            'prop-002': {'total': '4975.50', 'count': 4}, 
-            'prop-003': {'total': '6100.50', 'count': 2},
-            'prop-004': {'total': '1776.50', 'count': 4},
-            'prop-005': {'total': '3256.00', 'count': 3}
-        }
-        
-        mock_property_data = mock_data.get(property_id, {'total': '0.00', 'count': 0})
-        
+            latest = await session.execute(
+                text("""
+                    SELECT check_in_date
+                    FROM reservations
+                    WHERE property_id = :property_id AND tenant_id = :tenant_id
+                    ORDER BY check_in_date DESC
+                    LIMIT 1
+                """),
+                {"property_id": property_id, "tenant_id": tenant_id},
+            )
+            latest_row = latest.fetchone()
+            if latest_row and latest_row.check_in_date:
+                local = latest_row.check_in_date.astimezone(property_tz)
+                target_year, target_month = local.year, local.month
+            else:
+                now_local = datetime.now(property_tz)
+                target_year, target_month = now_local.year, now_local.month
+
+        start_local, end_local = _month_bounds_local(target_year, target_month, property_tz)
+
+        query = text("""
+            SELECT
+                COALESCE(SUM(total_amount), 0) AS total_revenue,
+                COUNT(*) AS reservation_count
+            FROM reservations
+            WHERE property_id = :property_id
+              AND tenant_id = :tenant_id
+              AND check_in_date >= :start_date
+              AND check_in_date < :end_date
+        """)
+
+        result = await session.execute(query, {
+            "property_id": property_id,
+            "tenant_id": tenant_id,
+            "start_date": start_local,
+            "end_date": end_local,
+        })
+        row = result.fetchone()
+
+        raw_total = row.total_revenue if row else Decimal("0")
+        reservation_count = row.reservation_count if row else 0
+
+        # NUMERIC(10, 3) arrives as Decimal; keep full precision and round once.
+        total_revenue = _to_money(Decimal(raw_total))
+
         return {
             "property_id": property_id,
-            "tenant_id": tenant_id, 
-            "total": mock_property_data['total'],
+            "tenant_id": tenant_id,
+            "total": str(total_revenue),
             "currency": "USD",
-            "count": mock_property_data['count']
+            "count": reservation_count,
+            "month": target_month,
+            "year": target_year,
+            "timezone": timezone_name,
         }

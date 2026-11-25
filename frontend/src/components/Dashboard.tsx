@@ -1,16 +1,41 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { RevenueSummary } from "./RevenueSummary";
+import { useAppContext } from "../contexts/AppContext";
 
-const PROPERTIES = [
-  { id: 'prop-001', name: 'Beach House Alpha' },
-  { id: 'prop-002', name: 'City Apartment Downtown' },
-  { id: 'prop-003', name: 'Country Villa Estate' },
-  { id: 'prop-004', name: 'Lakeside Cottage' },
-  { id: 'prop-005', name: 'Urban Loft Modern' }
+interface PropertyOption {
+  id: string;
+  name: string;
+  tenantId: string;
+}
+
+const PROPERTIES: PropertyOption[] = [
+  { id: 'prop-001', name: 'Beach House Alpha', tenantId: 'tenant-a' },
+  { id: 'prop-002', name: 'City Apartment Downtown', tenantId: 'tenant-a' },
+  { id: 'prop-003', name: 'Country Villa Estate', tenantId: 'tenant-a' },
+  { id: 'prop-001', name: 'Mountain Lodge Beta', tenantId: 'tenant-b' },
+  { id: 'prop-004', name: 'Lakeside Cottage', tenantId: 'tenant-b' },
+  { id: 'prop-005', name: 'Urban Loft Modern', tenantId: 'tenant-b' }
 ];
 
 const Dashboard: React.FC = () => {
+  const { user, tenant } = useAppContext();
+
+  // Only show the properties that belong to the signed-in client.
+  // Property IDs are only unique within a tenant, so the tenant must be part
+  // of the key.
+  const tenantId = tenant?.id || user?.tenant_id || null;
+  const properties = useMemo(
+    () => (tenantId ? PROPERTIES.filter((p) => p.tenantId === tenantId) : []),
+    [tenantId]
+  );
+
   const [selectedProperty, setSelectedProperty] = useState('prop-001');
+
+  useEffect(() => {
+    if (properties.length && !properties.some((p) => p.id === selectedProperty)) {
+      setSelectedProperty(properties[0].id);
+    }
+  }, [properties, selectedProperty]);
 
   return (
     <div className="p-4 lg:p-6 min-h-full">
@@ -35,7 +60,7 @@ const Dashboard: React.FC = () => {
                   onChange={(e) => setSelectedProperty(e.target.value)}
                   className="block w-full sm:w-auto min-w-[200px] px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 text-sm"
                 >
-                  {PROPERTIES.map((property) => (
+                  {properties.map((property) => (
                     <option key={property.id} value={property.id}>
                       {property.name}
                     </option>

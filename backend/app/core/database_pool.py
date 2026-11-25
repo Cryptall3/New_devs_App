@@ -1,7 +1,8 @@
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import QueuePool
 import logging
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 from ..config import settings
 
 logger = logging.getLogger(__name__)
@@ -14,16 +15,20 @@ class DatabasePool:
     async def initialize(self):
         """Initialize database connection pool"""
         try:
-            # Create async engine with connection pooling
-            database_url = f"postgresql+asyncpg://{settings.supabase_db_user}:{settings.supabase_db_password}@{settings.supabase_db_host}:{settings.supabase_db_port}/{settings.supabase_db_name}"
-            
+            # Create async engine with connection pooling.
+            # The configured URL is a plain psycopg-style DSN; async SQLAlchemy needs the asyncpg driver.
+            database_url = settings.database_url
+            if database_url.startswith("postgresql://"):
+                database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif database_url.startswith("postgres://"):
+                database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
             self.engine = create_async_engine(
                 database_url,
-                poolclass=QueuePool,
-                pool_size=20,  # Number of connections to maintain
-                max_overflow=30,  # Additional connections when needed
+                pool_size=settings.database_pool_size,
+                max_overflow=settings.database_max_overflow,
                 pool_pre_ping=True,  # Validate connections
-                pool_recycle=3600,  # Recycle connections every hour
+                pool_recycle=settings.database_pool_recycle,  # Recycle connections every hour
                 echo=False  # Set to True for SQL debugging
             )
             
@@ -45,11 +50,16 @@ class DatabasePool:
         if self.engine:
             await self.engine.dispose()
     
-    async def get_session(self) -> AsyncSession:
+    @asynccontextmanager
+    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
         """Get database session from pool"""
         if not self.session_factory:
             raise Exception("Database pool not initialized")
-        return self.session_factory()
+        session = self.session_factory()
+        try:
+            yield session
+        finally:
+            await session.close()
 
 # Global database pool instance
 db_pool = DatabasePool()
